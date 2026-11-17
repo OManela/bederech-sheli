@@ -32,8 +32,11 @@ export function renderSOS() {
     mount(root) {
       let hebrew = true;
       voiceStatus().then(v => {
-        hebrew = v.hebrew;
-        $('#voice-card', root).innerHTML = v.hebrew
+        // If the browser doesn't list voices (some iOS home-screen apps), still try speaking; tones take over if it fails.
+        hebrew = v.hebrew || v.unknown;
+        $('#voice-card', root).innerHTML = v.unknown
+          ? `<p class="small" style="margin:0">ההקראה תתחיל בקול בעברית. אם הקול לא יעבוד, המצב יעבור אוטומטית לצלילי נשימה (צליל עולה – שאיפה, יורד – נשיפה).</p>`
+          : v.hebrew
           ? `<p class="small" style="margin:0">${icon('check', 'width="16" height="16" style="vertical-align:-3px;color:var(--good)"')} קול בעברית זמין${v.name ? ` (${esc(v.name)})` : ''}.${wakeLockSupported() ? '' : ' <span class="muted">המסך עלול לכבות – כדאי להאריך את זמן הנעילה האוטומטית בהגדרות האייפון.</span>'}</p>`
           : `<p class="small" style="margin:0"><b>לא נמצא קול בעברית במכשיר.</b> המצב יעבוד עם צלילי נשימה בלבד (צליל עולה – שאיפה, יורד – נשיפה). אפשר להוסיף קול: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית.</p>`;
       });
@@ -47,15 +50,21 @@ export function renderSOS() {
         document.body.appendChild(overlay);
         overlay.addEventListener('click', () => { stopAll(); toast('מצב SOS הופסק. כל הכבוד'); });
 
-        if (hebrew) {
-          const name = store.get().name;
-          player = playScript(personalizeSegs(SOS_INTRO, name), { loop: personalizeSegs(SOS_LOOP, name) });
-        } else {
+        const tones = () => {
           const cycle = (kind) => {
             breathTone(kind, kind === 'in' ? 4 : 6);
             toneTimer = setTimeout(() => cycle(kind === 'in' ? 'out' : 'in'), (kind === 'in' ? 4 : 6) * 1000 + 300);
           };
           cycle('in');
+        };
+        if (hebrew) {
+          const name = store.get().name;
+          player = playScript(personalizeSegs(SOS_INTRO, name), {
+            loop: personalizeSegs(SOS_LOOP, name),
+            onFail: () => { player = null; if (overlay) tones(); },
+          });
+        } else {
+          tones();
         }
       };
       return stopAll;
@@ -119,6 +128,9 @@ export function renderImaginal({ id }) {
         player = playScript(sc.segments, {
           onSegment: (i, text) => { cap.textContent = text; bar.style.width = `${((i + 1) / sc.segments.length) * 100}%`; },
           onEnd: () => stage3(),
+          onFail: () => {
+            cap.innerHTML = 'הקול לא התחיל לדבר. בדקי שמתג השקט כבוי והווליום מוגבר, ונסי שוב.<br><a href="#/settings">בדיקת הקול בהגדרות</a>';
+          },
         });
         $('#im-stop', box).onclick = () => { player.stop(); stage3(); };
       };

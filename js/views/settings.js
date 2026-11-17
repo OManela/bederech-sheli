@@ -43,6 +43,16 @@ export function render() {
         <p class="small" id="st-voice">בודקת…</p>
         ${rangeField({ id: 'st-rate', label: 'מהירות ההקראה', min: 0.6, max: 1.2, step: 0.05, value: s.settings.rate, lo: 'איטי', hi: 'מהיר' })}
         <button class="btn block" id="st-test">השמיעי דוגמה</button>
+        <div class="callout" id="st-voice-help" hidden style="margin-top:12px">
+          <b>הקול לא התחיל לדבר.</b> כדאי לבדוק:
+          <ol style="margin:6px 0 0;padding-inline-start:1.2em">
+            <li>מתג השקט בצד האייפון – כבוי (בלי פס כתום), והווליום מוגבר.</li>
+            <li>באייפון: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית – שיש קול שהורד (למשל כרמית).</li>
+            <li>לסגור את האפליקציה לגמרי (החלקה למעלה) ולפתוח שוב.</li>
+            <li>לנסות אותו דבר מתוך ספארי, בכתובת של האפליקציה.</li>
+          </ol>
+          <p class="small muted" style="margin:6px 0 0">גם בלי קול, מצב SOS עובד עם צלילי נשימה.</p>
+        </div>
       </div>
 
       <div class="card">
@@ -86,12 +96,21 @@ export function render() {
       voiceStatus().then(v => {
         $('#st-voice', root).innerHTML = !v.supported ? 'הקראה קולית לא נתמכת בדפדפן הזה.'
           : v.hebrew ? `קול בעברית זמין${v.name ? `: ${esc(v.name)}` : ''}.`
-            : 'לא נמצא קול בעברית. באייפון: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית, והורידי קול (למשל כרמית).';
+            : v.unknown ? 'הדפדפן לא מציג את רשימת הקולות. לחצי "השמיעי דוגמה" כדי לבדוק.'
+              : 'לא נמצא קול בעברית. באייפון: הגדרות ← נגישות ← תוכן מוקרא ← קולות ← עברית, והורידי קול (למשל כרמית).';
       });
       $('#st-rate', root).addEventListener('change', () => store.update(x => { x.settings.rate = num('st-rate'); }));
-      $('#st-test', root).onclick = () => {
+      const testBtn = $('#st-test', root), help = $('#st-voice-help', root);
+      testBtn.onclick = () => {
         store.update(x => { x.settings.rate = num('st-rate'); });
-        speakTest(`שלום ${store.get().name}. נשימה איטית… ונשיפה ארוכה.`);
+        help.hidden = true;
+        testBtn.textContent = 'מנסה להשמיע…';
+        testBtn.disabled = true;
+        speakTest(`שלום ${store.get().name}. נשימה איטית… ונשיפה ארוכה.`).then(r => {
+          testBtn.disabled = false;
+          testBtn.textContent = 'השמיעי דוגמה';
+          if (r === 'failed') help.hidden = false;
+        });
       };
 
       $('#st-export', root).onclick = () => {

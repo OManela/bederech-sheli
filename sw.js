@@ -1,5 +1,5 @@
 // Offline cache. Bump VERSION whenever any file changes.
-const VERSION = 'bederech-sheli-v2';
+const VERSION = 'bederech-sheli-v3';
 const ASSETS = [
   './',
   'index.html',

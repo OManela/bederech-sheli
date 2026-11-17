@@ -4,34 +4,46 @@ import { store } from './store.js';
 const synth = window.speechSynthesis;
 let heVoice = null;
 let voicesReady = false;
+let voiceCount = 0;
+let skipVoice = false; // set when the chosen voice object fails, so we fall back to lang only
+const alive = new Set(); // keeps utterances referenced (WebKit can garbage-collect them mid-speech)
 
 function pickVoice() {
   if (!synth) return;
   const voices = synth.getVoices();
   if (!voices.length) return;
   voicesReady = true;
+  voiceCount = voices.length;
+  const he = voices.filter(v => /^(he|iw)/i.test(v.lang));
   heVoice =
-    voices.find(v => /^he/i.test(v.lang) && /carmit/i.test(v.name)) ||
-    voices.find(v => /^he|^iw/i.test(v.lang)) ||
-    null;
+    he.find(v => /carmit/i.test(v.name) && v.localService !== false) ||
+    he.find(v => /carmit/i.test(v.name)) ||
+    he.find(v => v.localService !== false) ||
+    he[0] || null;
 }
 if (synth) {
   pickVoice();
   synth.addEventListener?.('voiceschanged', pickVoice);
 }
 
-/** Resolves once voices have loaded (or after a short timeout). */
+/**
+ * Resolves once voices have loaded (or after a short timeout).
+ * `unknown` means the browser didn't list its voices (some iOS home-screen apps); speech may still work.
+ */
 export function voiceStatus() {
+  const result = () => ({
+    supported: !!synth,
+    hebrew: !!heVoice,
+    unknown: !!synth && !voicesReady,
+    name: heVoice?.name,
+    count: voiceCount,
+  });
   return new Promise(resolve => {
-    if (!synth) return resolve({ supported: false, hebrew: false });
-    if (voicesReady) return resolve({ supported: true, hebrew: !!heVoice, name: heVoice?.name });
+    if (!synth || voicesReady) return resolve(result());
     let tries = 0;
     const t = setInterval(() => {
       pickVoice();
-      if (voicesReady || ++tries > 15) {
-        clearInterval(t);
-        resolve({ supported: true, hebrew: !!heVoice, name: heVoice?.name });
-      }
+      if (voicesReady || ++tries > 20) { clearInterval(t); resolve(result()); }
     }, 100);
   });
 }
@@ -39,48 +51,81 @@ export function voiceStatus() {
 // iOS 17+: play through the silent switch.
 try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch { /* ignore */ }
 
-function speakOne(text) {
+/**
+ * Speaks one utterance. Must be called synchronously inside a tap the first time (iOS).
+ * Resolves 'ok' when it finished, or 'failed' when speech never started.
+ */
+function speakRaw(text, useVoice) {
   return new Promise(resolve => {
-    if (!synth || !text) return resolve();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'he-IL';
-    if (heVoice) u.voice = heVoice;
+    if (useVoice && heVoice) u.voice = heVoice;
     u.rate = store.get().settings.rate || 0.9;
     u.pitch = 1;
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    u.onend = finish;
-    u.onerror = finish;
+    u.volume = 1;
+    alive.add(u);
+    let started = false, done = false;
+    const finish = r => {
+      if (done) return;
+      done = true;
+      clearTimeout(startGuard); clearTimeout(endGuard);
+      alive.delete(u);
+      resolve(r);
+    };
+    u.onstart = () => { started = true; };
+    u.onend = () => finish(started ? 'ok' : 'failed');
+    u.onerror = e => finish(started || e.error === 'interrupted' || e.error === 'canceled' ? 'ok' : 'failed');
+    // If speech hasn't started within a few seconds, treat it as failed.
+    const startGuard = setTimeout(() => { if (!started) { try { synth.cancel(); } catch { /* ignore */ } finish('failed'); } }, 4000);
     // Safety net if onend never fires (known WebKit quirk).
-    setTimeout(finish, 1500 + text.length * 140);
+    const endGuard = setTimeout(() => finish(started ? 'ok' : 'failed'), 4000 + text.length * 160);
+    try { synth.resume(); } catch { /* ignore */ } // iOS can get stuck in a paused state
     synth.speak(u);
   });
 }
 
+async function speakOne(text) {
+  if (!synth || !text) return 'failed';
+  const withVoice = !!heVoice && !skipVoice;
+  const r = await speakRaw(text, withVoice);
+  if (r === 'failed' && withVoice) {
+    // Some listed voices can't actually be used by the browser; retry with the default Hebrew voice.
+    skipVoice = true;
+    return speakRaw(text, false);
+  }
+  return r;
+}
+
 /**
  * Plays [text, pauseMs] segments. Returns a controller with stop().
- * onSegment(i, text) lets the UI show captions.
+ * onSegment(i, text) lets the UI show captions. onFail() fires if the voice never starts.
  */
-export function playScript(segments, { loop = null, onSegment, onEnd } = {}) {
+export function playScript(segments, { loop = null, onSegment, onEnd, onFail } = {}) {
   let stopped = false;
   let timer = null;
+  let first = true;
   const wait = ms => new Promise(r => { timer = setTimeout(r, ms); });
 
   async function run(list, offset) {
     for (let i = 0; i < list.length; i++) {
-      if (stopped) return;
+      if (stopped) return false;
       const [text, pause] = list[i];
       onSegment && onSegment(offset + i, text);
-      await speakOne(text);
-      if (stopped) return;
+      const r = await speakOne(text);
+      if (stopped) return false;
+      if (first) {
+        first = false;
+        if (r === 'failed') { stopped = true; onFail && onFail(); return false; }
+      }
       await wait(pause || 0);
     }
+    return true;
   }
 
   (async () => {
     unlockAudio();
-    await run(segments, 0);
-    while (loop && !stopped) await run(loop, segments.length);
+    if (!(await run(segments, 0))) return;
+    while (loop && !stopped) if (!(await run(loop, segments.length))) return;
     if (!stopped) onEnd && onEnd();
   })();
 
@@ -93,10 +138,17 @@ export function playScript(segments, { loop = null, onSegment, onEnd } = {}) {
   };
 }
 
+/** Plays a sample from a tap. Resolves 'ok' | 'failed'. onStart fires when the voice actually begins. */
 export function speakTest(text) {
-  unlockAudio();
-  if (synth) synth.cancel();
-  return speakOne(text);
+  if (!synth) return Promise.resolve('failed');
+  // WebKit drops a speak() that comes right after cancel(), so only cancel when needed, and wait a moment after.
+  if (synth.speaking || synth.pending) {
+    synth.cancel();
+    return new Promise(r => setTimeout(r, 250)).then(() => speakOne(text));
+  }
+  const p = speakOne(text);
+  unlockAudio(); // after speak(), so the speech request is the first thing in the tap
+  return p;
 }
 
 // ---------- tones (Web Audio) ----------
